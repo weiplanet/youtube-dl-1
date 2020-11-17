@@ -1465,21 +1465,11 @@ class YoutubeIE(YoutubeBaseInfoExtractor):
     def _extract_chapters_from_json(self, webpage, video_id, duration):
         if not webpage:
             return
-        player = self._parse_json(
-            self._search_regex(
-                r'RELATED_PLAYER_ARGS["\']\s*:\s*({.+})\s*,?\s*\n', webpage,
-                'player args', default='{}'),
-            video_id, fatal=False)
-        if not player or not isinstance(player, dict):
-            return
-        watch_next_response = player.get('watch_next_response')
-        if not isinstance(watch_next_response, compat_str):
-            return
-        response = self._parse_json(watch_next_response, video_id, fatal=False)
-        if not response or not isinstance(response, dict):
+        data = self._extract_yt_initial_data(video_id, webpage)
+        if not data or not isinstance(data, dict):
             return
         chapters_list = try_get(
-            response,
+            data,
             lambda x: x['playerOverlays']
                        ['playerOverlayRenderer']
                        ['decoratedPlayerBarRenderer']
@@ -2723,7 +2713,7 @@ class YoutubeTabIE(YoutubeBaseInfoExtractor):
                 'itct': ctp,
             }
 
-    def _entries(self, tab):
+    def _entries(self, tab, identity_token):
         continuation = None
         slr_contents = tab['sectionListRenderer']['contents']
         for slr_content in slr_contents:
@@ -2768,16 +2758,20 @@ class YoutubeTabIE(YoutubeBaseInfoExtractor):
             if not continuation:
                 continuation = self._extract_continuation(is_renderer)
 
+        headers = {
+            'x-youtube-client-name': '1',
+            'x-youtube-client-version': '2.20201112.04.01',
+        }
+        if identity_token:
+            headers['x-youtube-identity-token'] = identity_token
+
         for page_num in itertools.count(1):
             if not continuation:
                 break
             browse = self._download_json(
                 'https://www.youtube.com/browse_ajax', None,
                 'Downloading page %d' % page_num,
-                headers={
-                    'x-youtube-client-name': '1',
-                    'x-youtube-client-version': '2.20201030.01.00',
-                }, query=continuation, fatal=False)
+                headers=headers, query=continuation, fatal=False)
             if not browse:
                 break
             response = try_get(browse, lambda x: x[1]['response'], dict)
@@ -2831,27 +2825,36 @@ class YoutubeTabIE(YoutubeBaseInfoExtractor):
             raise ExtractorError('Unable to find selected tab')
 
     def _real_extract(self, url):
-        channel_id = self._match_id(url)
+        item_id = self._match_id(url)
         url = compat_urlparse.urlunparse(
             compat_urlparse.urlparse(url)._replace(netloc='www.youtube.com'))
-        webpage = self._download_webpage(url, channel_id)
-        data = self._extract_yt_initial_data(channel_id, webpage)
+        webpage = self._download_webpage(url, item_id)
+        data = self._extract_yt_initial_data(item_id, webpage)
         tabs = data['contents']['twoColumnBrowseResultsRenderer']['tabs']
         selected_tab = self._extract_selected_tab(tabs)
-        channel_title = try_get(
-            data, lambda x: x['metadata']['channelMetadataRenderer']['title'],
-            compat_str)
-        channel_external_id = try_get(
-            data, lambda x: x['metadata']['channelMetadataRenderer']['externalId'],
-            compat_str)
-        tab_title = selected_tab.get('title')
-        title = channel_title or channel_id
-        if tab_title:
-            title += ' - %s' % tab_title
+        renderer = try_get(
+            data, lambda x: x['metadata']['channelMetadataRenderer'], dict)
+        if renderer:
+            channel_title = renderer.get('title') or item_id
+            tab_title = selected_tab.get('title')
+            title = channel_title or item_id
+            if tab_title:
+                title += ' - %s' % tab_title
+            description = renderer.get('description')
+            playlist_id = renderer.get('externalId')
+        renderer = try_get(
+            data, lambda x: x['metadata']['playlistMetadataRenderer'], dict)
+        if renderer:
+            title = renderer.get('title')
+            description = None
+            playlist_id = item_id
+        identity_token = self._search_regex(
+            r'\bID_TOKEN["\']\s*:\s*["\'](.+?)["\']', webpage,
+            'identity token', default=None)
         return self.playlist_result(
-            self._entries(selected_tab['content']),
-            playlist_id=channel_external_id or channel_id,
-            playlist_title=title)
+            self._entries(selected_tab['content'], identity_token),
+            playlist_id=playlist_id, playlist_title=title,
+            playlist_description=description)
 
 
 class YoutubePlaylistIE(InfoExtractor):
